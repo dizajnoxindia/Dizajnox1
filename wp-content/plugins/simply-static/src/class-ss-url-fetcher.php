@@ -113,7 +113,7 @@ class Url_Fetcher {
 		// Check if the URL is a local asset (file) that we can copy directly
 		if ( $is_local_asset ) {
 			// Get the local path for the URL using the original URL without query parameters
-			$local_path = Util::get_path_from_local_url( Util::remove_params_and_fragment( $original_url ) );
+			$local_path = Util::get_source_path_from_local_url( Util::remove_params_and_fragment( $original_url ) );
 			$file_path  = ABSPATH . ltrim( $local_path, '/' );
 
 			Util::debug_log( "Local path: " . $local_path . " - Full file path: " . $file_path );
@@ -136,12 +136,12 @@ class Url_Fetcher {
 				} else {
 					// If copy fails, fall back to remote_get
 					Util::debug_log( "Failed to copy local file, falling back to remote_get" );
-					$response = self::remote_get( $url, $temp_filename );
+					$response = self::remote_get( Util::get_source_url_from_local_url( $url ), $temp_filename );
 				}
 			} else {
 				// If file doesn't exist, fall back to remote_get
 				Util::debug_log( "Local file not found, falling back to remote_get" );
-				$response = self::remote_get( $url, $temp_filename );
+				$response = self::remote_get( Util::get_source_url_from_local_url( $url ), $temp_filename );
 			}
 		} else {
 			// Not a local asset, use remote_get as before
@@ -160,7 +160,7 @@ class Url_Fetcher {
 				$recovered = false;
 				// Attempt 1: If it is a local asset, try copying directly from disk again.
 				if ( isset( $is_local_asset ) && $is_local_asset ) {
-					$local_path = Util::get_path_from_local_url( Util::remove_params_and_fragment( $original_url ) );
+					$local_path = Util::get_source_path_from_local_url( Util::remove_params_and_fragment( $original_url ) );
 					$file_path  = ABSPATH . ltrim( $local_path, '/' );
 					if ( file_exists( $file_path ) && is_readable( $file_path ) ) {
 						$recovered = copy( $file_path, $temp_filename );
@@ -172,7 +172,7 @@ class Url_Fetcher {
 				}
 				// Attempt 2: Do a non-streamed request and write body manually.
 				if ( ! $recovered ) {
- 				$alt_args          = array(
+					$alt_args          = array(
 						'timeout'     => self::TIMEOUT,
 						'user-agent'  => apply_filters( 'ss_crawler_user_agent', self::DEFAULT_USER_AGENT ),
 						'sslverify'   => false,
@@ -184,7 +184,8 @@ class Url_Fetcher {
 					if ( $basic_auth_digest ) {
 						$alt_args['headers'] = array( 'Authorization' => 'Basic ' . $basic_auth_digest );
 					}
-					$alt_resp = wp_remote_get( $url, apply_filters( 'ss_remote_get_args', $alt_args ) );
+					$alt_url  = isset( $is_local_asset ) && $is_local_asset ? Util::get_source_url_from_local_url( $url ) : $url;
+					$alt_resp = wp_remote_get( $alt_url, apply_filters( 'ss_remote_get_args', $alt_args ) );
 					if ( ! is_wp_error( $alt_resp ) ) {
 						$body = wp_remote_retrieve_body( $alt_resp );
 						if ( strlen( $body ) > 0 ) {
@@ -266,6 +267,7 @@ class Url_Fetcher {
 				}
 
 				if ( $renamed ) {
+					Util::debug_log( "Saved temp file to: " . $file_path );
 					$static_page->get_handler()->after_file_fetch( $this->archive_dir );
 				}
 			} else {
@@ -349,6 +351,16 @@ class Url_Fetcher {
 			'gz'    => 'application/gzip',
 			'rar'   => 'application/vnd.rar',
 			'7z'    => 'application/x-7z-compressed',
+			'mp3'   => 'audio/mpeg',
+			'm4a'   => 'audio/mp4',
+			'oga'   => 'audio/ogg',
+			'ogg'   => 'audio/ogg',
+			'wav'   => 'audio/wav',
+			'webm'  => 'video/webm',
+			'mp4'   => 'video/mp4',
+			'm4v'   => 'video/mp4',
+			'mov'   => 'video/quicktime',
+			'ogv'   => 'video/ogg',
 			'woff'  => 'font/woff',
 			'woff2' => 'font/woff2',
 			'ttf'   => 'font/ttf',
@@ -375,6 +387,10 @@ class Url_Fetcher {
 			return true;
 		}
 
+		if ( in_array( (int) $static_page->http_status_code, array( 301, 302, 303, 307, 308 ), true ) ) {
+			return false;
+		}
+
 		$page_handler = $static_page->get_handler();
 		if ( $static_page->http_status_code === 404 && $page_handler && is_a( $page_handler, Handler_404::class ) ) {
 			return true;
@@ -398,14 +414,9 @@ class Url_Fetcher {
 		// a domain with no trailing slash has no path, so we're giving it one
 		$path = isset( $url_parts['path'] ) ? $url_parts['path'] : '/';
 
-		$origin_path = wp_parse_url( Util::origin_url(), PHP_URL_PATH );
-
-		if ( null !== $origin_path && '' !== $origin_path ) {
-			$origin_path_length = strlen( $origin_path );
-
-			if ( $origin_path_length > 1 ) { // prevents removal of '/'.
-				$path = substr( $path, $origin_path_length );
-			}
+		$local_path = Util::get_public_path_from_local_url( Util::remove_params_and_fragment( $static_page->url ) );
+		if ( is_string( $local_path ) && '' !== $local_path ) {
+			$path = $local_path;
 		}
 
 		$path_info = Util::url_path_info( $path );

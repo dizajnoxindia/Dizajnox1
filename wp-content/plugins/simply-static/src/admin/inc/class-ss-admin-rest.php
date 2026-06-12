@@ -635,14 +635,15 @@ class Admin_Rest {
 
         // 1. Count posts modified since last export.
         if ( ! empty( $last_export_end ) ) {
-            $post_types = get_post_types( array( 'public' => true ), 'names' );
-            $placeholders = implode( ',', array_fill( 0, count( $post_types ), '%s' ) );
+            $post_types          = get_post_types( array( 'public' => true ), 'names' );
+            $placeholders        = implode( ',', array_fill( 0, count( $post_types ), '%s' ) );
+            $last_export_end_gmt = get_gmt_from_date( $last_export_end );
 
             // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
             $modified_count = (int) $wpdb->get_var(
                 $wpdb->prepare(
-                    "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_status = 'publish' AND post_type IN ({$placeholders}) AND post_modified > %s",
-                    array_merge( array_values( $post_types ), array( $last_export_end ) )
+                    "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_status = 'publish' AND post_type IN ({$placeholders}) AND ( post_date_gmt > %s OR post_modified_gmt > %s )",
+                    array_merge( array_values( $post_types ), array( $last_export_end_gmt, $last_export_end_gmt ) )
                 )
             );
         }
@@ -1050,6 +1051,18 @@ class Admin_Rest {
             $options['ss_webhook_enabled_types'] = array_values( array_intersect( $allowed, $options['ss_webhook_enabled_types'] ) );
         }
 
+        // Empty means all public post types; non-empty selections must be valid public post type slugs.
+        $allowed_post_types = get_post_types( [ 'public' => true ], 'names' );
+        $allowed_post_types = array_values( array_diff( $allowed_post_types, [ 'attachment', 'elementor_library', 'ssp-form' ] ) );
+
+        if ( isset( $options['post_types'] ) && is_array( $options['post_types'] ) ) {
+            $options['post_types'] = array_values( array_intersect( $options['post_types'], $allowed_post_types ) );
+        }
+
+        if ( isset( $options['ss_single_auto_export_types'] ) && is_array( $options['ss_single_auto_export_types'] ) ) {
+            $options['ss_single_auto_export_types'] = array_values( array_intersect( $options['ss_single_auto_export_types'], $allowed_post_types ) );
+        }
+
         // Persist options
         update_option( 'simply-static', $options );
 
@@ -1134,6 +1147,12 @@ class Admin_Rest {
             'generate_type'                 => 'export',
             'destination_url'               => '',
             'destination_url_type'          => 'relative',
+            'wp_content_directory'          => 'wp-content',
+            'wp_includes_directory'         => 'wp-includes',
+            'wp_uploads_directory'          => 'uploads',
+            'wp_plugins_directory'          => 'plugins',
+            'wp_themes_directory'           => 'themes',
+            'theme_style_name'              => 'style',
             'archive_start_time'            => null,
             'archive_end_time'              => null,
             'version'                       => SIMPLY_STATIC_VERSION,

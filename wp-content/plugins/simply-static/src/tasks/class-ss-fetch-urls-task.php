@@ -261,11 +261,15 @@ class Fetch_Urls_Task extends Task {
 	 * @return void
 	 */
 	public function handle_200_response( $static_page, $save_file, $follow_urls ) {
-		if ( $save_file || $follow_urls ) {
+		$urls = array();
+
+		if ( ( $save_file || $follow_urls ) && $this->can_extract_urls_from_static_page( $static_page ) ) {
 			Util::debug_log( "Extracting URLs and replacing URLs in the static file" );
 			// Fetch all URLs from the page and add them to the queue...
 			$extractor = new Url_Extractor( $static_page );
 			$urls      = $extractor->extract_and_update_urls();
+		} elseif ( $save_file || $follow_urls ) {
+			Util::debug_log( "Skipping URL extraction for non-text file: " . $static_page->content_type );
 		}
 
 		if ( $follow_urls ) {
@@ -308,6 +312,33 @@ class Fetch_Urls_Task extends Task {
 	}
 
 	/**
+	 * Only text-like files can contain URLs that should be extracted or replaced.
+	 *
+	 * @param \Simply_Static\Page $static_page Record to inspect.
+	 *
+	 * @return bool
+	 */
+	protected function can_extract_urls_from_static_page( $static_page ) {
+		$file_path = isset( $static_page->file_path ) ? (string) $static_page->file_path : '';
+
+		if (
+			$static_page->is_type( 'html' ) ||
+			$static_page->is_type( 'css' ) ||
+			$static_page->is_type( 'xml' ) ||
+			$static_page->is_type( 'xsl' ) ||
+			$static_page->is_type( 'json' )
+		) {
+			return true;
+		}
+
+		if ( '' !== $file_path && substr( $file_path, -4 ) === '.css' ) {
+			return true;
+		}
+
+		return false;
+	}
+
+	/**
 	 * Process the response to a 30x redirection
 	 *
 	 * @param \Simply_Static\Page $static_page Record to update
@@ -317,7 +348,6 @@ class Fetch_Urls_Task extends Task {
 	 * @return void
 	 */
 	public function handle_30x_redirect( $static_page, $save_file, $follow_urls ) {
-		$origin_url      = Util::origin_url();
 		$destination_url = $this->options->get_destination_url();
 		$current_url     = $static_page->url;
 
@@ -357,6 +387,14 @@ class Fetch_Urls_Task extends Task {
 				Util::debug_log( "This looks like a redirect from http to https (or visa versa); adding new URL to the queue" );
 				$this->set_url_found_on( $static_page, $redirect_url );
 
+			} else if ( $this->redirect_resolves_to_same_static_path( $current_url, $redirect_url ) ) {
+				if ( Util::is_local_url( $redirect_url ) ) {
+					Util::debug_log( "This redirect resolves to the same static file path; adding new URL to the queue" );
+					$this->set_url_found_on( $static_page, $redirect_url );
+				} else {
+					Util::debug_log( "This redirect resolves to the same static file path; not adding non-local URL to the queue" );
+				}
+
 			} else {
 				// check if this is a local URL
 				if ( Util::is_local_url( $redirect_url ) ) {
@@ -369,10 +407,10 @@ class Fetch_Urls_Task extends Task {
 						$static_page->set_status_message( __( "Do not follow", 'simply-static' ) );
 					}
 					// and update the URL
-					// Replace origin host (any scheme) with the configured destination URL to ensure
-					// redirects point to the static site domain even when schemes differ (http/https).
-					$pattern      = '/^(https?:)?\/\/' . addcslashes( Util::origin_host(), '/' ) . '/i';
-					$redirect_url = preg_replace( $pattern, $destination_url, $redirect_url );
+					// Replace the matching local base with the configured destination URL. In proxy
+					// setups the redirect may point to home_url()/site_url() instead of the configured
+					// Origin URL, so use the local base that actually matched the redirect.
+					$redirect_url = Util::replace_local_url_base( $redirect_url, $destination_url );
 
 				}
 
@@ -413,6 +451,138 @@ class Fetch_Urls_Task extends Task {
 				$static_page->save();
 			}
 		}
+	}
+
+	/**
+	 * Check whether two URLs would be written to the same generated file.
+	 *
+	 * Proxy/subdirectory setups can redirect between the configured public origin
+	 * and the real WordPress install URL. Those are not user-facing redirects for
+	 * the static site; they are alternate local bases for the same static path.
+	 *
+	 * @param string $current_url Current URL.
+	 * @param string $redirect_url Redirect target URL.
+	 *
+	 * @return bool
+	 */
+	protected function redirect_resolves_to_same_static_path( $current_url, $redirect_url ) {
+		if ( ! Util::is_local_url( $current_url ) ) {
+			return false;
+		}
+
+		$current_path = $this->normalize_static_redirect_path( $current_url );
+		$redirect_path = $this->normalize_static_redirect_path( $redirect_url );
+
+		return '' !== $current_path && $current_path === $redirect_path;
+	}
+
+	/**
+	 * Normalize a local URL to the path Simply Static will generate for it.
+	 *
+	 * @param string $url URL to normalize.
+	 *
+	 * @return string
+	 */
+	protected function normalize_static_redirect_path( $url ) {
+		$url_without_fragment = preg_replace( '/#.*/', '', $url );
+		$export_path          = $this->get_path_from_export_url( $url_without_fragment );
+		$path                 = '' !== $export_path ? $export_path : '';
+
+		if ( '' === $path && Util::is_local_url( $url_without_fragment ) ) {
+			$path = Util::get_path_from_local_url( $url_without_fragment );
+		}
+
+		if ( ! is_string( $path ) || '' === $path ) {
+			return '';
+		}
+
+		$clean_path = Util::remove_params_and_fragment( $path );
+		$query      = Util::is_local_asset_url( $url ) ? '' : substr( $path, strlen( $clean_path ) );
+		$path       = Util::strip_index_filenames_from_url( $clean_path );
+		$path       = trailingslashit( $path );
+
+		return '/' . ltrim( $path, '/' ) . $query;
+	}
+
+	/**
+	 * Get the export-relative path from a URL that may use the configured static destination.
+	 *
+	 * @param string $url URL to normalize.
+	 *
+	 * @return string
+	 */
+	protected function get_path_from_export_url( $url ) {
+		if ( ! is_string( $url ) || '' === $url ) {
+			return '';
+		}
+
+		$url_parts = function_exists( 'wp_parse_url' ) ? wp_parse_url( $url ) : parse_url( $url );
+		if ( ! is_array( $url_parts ) || empty( $url_parts['host'] ) ) {
+			return '';
+		}
+
+		$url_host = strtolower( preg_replace( '/:\d+$/', '', (string) $url_parts['host'] ) );
+		$url_path = isset( $url_parts['path'] ) ? $url_parts['path'] : '/';
+
+		foreach ( $this->get_export_url_bases() as $base ) {
+			$base_parts = function_exists( 'wp_parse_url' ) ? wp_parse_url( $base ) : parse_url( $base );
+			if ( ! is_array( $base_parts ) || empty( $base_parts['host'] ) ) {
+				continue;
+			}
+
+			$base_host = strtolower( preg_replace( '/:\d+$/', '', (string) $base_parts['host'] ) );
+			if ( $url_host !== $base_host ) {
+				continue;
+			}
+
+			$base_path = isset( $base_parts['path'] ) ? untrailingslashit( $base_parts['path'] ) : '';
+			$match     = '' === $base_path || '/' === $base_path || untrailingslashit( $url_path ) === $base_path || strpos( untrailingslashit( $url_path ) . '/', trailingslashit( $base_path ) ) === 0;
+			if ( ! $match ) {
+				continue;
+			}
+
+			if ( '' !== $base_path && '/' !== $base_path ) {
+				$url_path = substr( $url_path, strlen( $base_path ) );
+				$url_path = '' === $url_path ? '/' : $url_path;
+			}
+
+			$query    = isset( $url_parts['query'] ) ? '?' . $url_parts['query'] : '';
+			$fragment = isset( $url_parts['fragment'] ) ? '#' . $url_parts['fragment'] : '';
+
+			return '/' . ltrim( $url_path, '/' ) . $query . $fragment;
+		}
+
+		return '';
+	}
+
+	/**
+	 * Get configured static destination bases used only for redirect equivalence checks.
+	 *
+	 * @return array
+	 */
+	protected function get_export_url_bases() {
+		$bases = array();
+
+		if ( 'absolute' === $this->options->get( 'destination_url_type' ) ) {
+			$bases[] = $this->options->get_destination_url();
+		}
+
+		$static_site_url = Util::get_static_site_url();
+		if ( '' !== $static_site_url ) {
+			$bases[] = $static_site_url;
+		}
+
+		$bases = array_filter( array_map( 'untrailingslashit', $bases ) );
+		$bases = array_values( array_unique( $bases ) );
+
+		usort( $bases, function ( $a, $b ) {
+			$a_path = function_exists( 'wp_parse_url' ) ? wp_parse_url( $a, PHP_URL_PATH ) : parse_url( $a, PHP_URL_PATH );
+			$b_path = function_exists( 'wp_parse_url' ) ? wp_parse_url( $b, PHP_URL_PATH ) : parse_url( $b, PHP_URL_PATH );
+
+			return strlen( (string) $b_path ) <=> strlen( (string) $a_path );
+		} );
+
+		return $bases;
 	}
 
 	/**
@@ -543,26 +713,14 @@ class Fetch_Urls_Task extends Task {
 	public function get_generate_type() {
 		$type = $this->parent_get_generate_type();
 
-		// Even on update, fetch should always get all pages.
+		// By default, update exports fetch all known pages so content hashes can
+		// determine which files changed. Integrations with their own change
+		// detection can opt into the update-scoped query instead.
 		if ( 'update' === $type ) {
-			$type = 'export';
+			$type = apply_filters( 'simply_static_fetch_urls_update_generate_type', 'export', $this );
 		}
 
 		return $type;
 	}
 
-	/**
-	 * Get total number of pages to process.
-	 * For this task, we don't use the cached values.
-	 *
-	 * @param boolean $cached Whether to use cached values.
-	 *
-	 * @return int|null
-	 * @throws \Exception
-	 */
-	public function get_total_pages( $cached = true ) {
-
-		return $this->get_total_pages_sql();
-
-	}
 }

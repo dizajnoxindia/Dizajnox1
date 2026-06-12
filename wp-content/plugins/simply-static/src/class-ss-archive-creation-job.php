@@ -133,6 +133,11 @@ class Archive_Creation_Job extends Background_Process {
 		do_action( 'ss_archive_creation_job_before_start', $blog_id, $this );
 
 		if ( $this->is_job_done() ) {
+			// Persist the requested type before building the task list so filters
+			// can decide between export/update behavior without reading stale options.
+			$this->options
+				->set( 'generate_type', $type )
+				->save();
 
 			$task_list = $this->get_task_list();
 
@@ -153,6 +158,9 @@ class Archive_Creation_Job extends Background_Process {
 				->set( 'archive_start_time', Util::formatted_datetime() )
 				->set( 'archive_end_time', null )
 				->set( 'generate_type', $type )
+				->set( 'zip_batch_offset', null )
+				->set( 'zip_total_files', null )
+				->set( 'zip_files', null )
 				->save();
 
 			Util::debug_log( "Pushing first task to queue: " . $first_task );

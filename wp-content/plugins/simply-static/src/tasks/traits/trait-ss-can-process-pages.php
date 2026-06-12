@@ -83,16 +83,16 @@ trait canProcessPages {
 	 * Maximum number of seconds process_pages() should run before yielding
 	 * back to the background process dispatcher.
 	 *
-	 * Keeping this well below typical server hard-kill limits (60-120 s)
-	 * prevents the PHP process from being terminated mid-batch, which
-	 * would break the inline-dispatch shutdown-function chain on
-	 * restricted hosting environments (WP Engine, Flywheel, etc.).
+	 * Keeping this below the background process' default 20 second
+	 * continuation window prevents the PHP process from spending too long
+	 * inside a single task before the dispatcher can hand off the next
+	 * request.
 	 *
 	 * Filterable via `simply_static_max_batch_time`.
 	 *
 	 * @var int
 	 */
-	protected $max_batch_time = 50;
+	protected $max_batch_time = 15;
 
 	/**
 	 * Process Pages that have to be processed/transferred.
@@ -183,6 +183,15 @@ trait canProcessPages {
 				$static_page->save();
 				break;
 			} catch ( \Exception $e ) {
+				Util::debug_log( 'Page URL: ' . $static_page->url . ' not being processed. Error: ' . $e->getMessage() );
+				// Reset the claim so the page can be retried on next iteration.
+				$wpdb->query( $wpdb->prepare(
+					"UPDATE {$table_name} SET {$this->processing_column} = NULL WHERE id = %d",
+					$static_page->id
+				) );
+				$static_page->set_error_message( $e->getMessage() );
+				$static_page->save();
+			} catch ( \Throwable $e ) {
 				Util::debug_log( 'Page URL: ' . $static_page->url . ' not being processed. Error: ' . $e->getMessage() );
 				// Reset the claim so the page can be retried on next iteration.
 				$wpdb->query( $wpdb->prepare(
@@ -318,10 +327,25 @@ trait canProcessPages {
 			return $this->get_total_pages_sql();
 		}
 
-		$count = get_option( 'simply_static_' . static::$task_name . '_total_pages' );
+		$option_name = 'simply_static_' . static::$task_name . '_total_pages';
+		$count       = get_option( $option_name );
+
 		if ( false === $count ) {
 			$count = $this->get_total_pages_sql();
-			update_option( 'simply_static_' . static::$task_name . '_total_pages', $count );
+			update_option( $option_name, $count );
+		} else {
+			$count = (int) $count;
+		}
+
+		if ( 'update' === $this->get_generate_type() ) {
+			$current_total = $this->get_processed_pages() + $this->get_total_pages_sql();
+		} else {
+			$current_total = $this->get_total_pages_sql();
+		}
+
+		if ( $current_total > $count ) {
+			$count = $current_total;
+			update_option( $option_name, $count );
 		}
 
 		return $count;
